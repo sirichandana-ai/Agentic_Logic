@@ -33,7 +33,6 @@ def _to_float(token: str) -> Optional[float]:
 
 
 def _tokenize(line: str) -> List[str]:
-    # Handle markdown/ocr mixed separators robustly.
     cleaned = line.replace("|", " ")
     return [_clean_token(t) for t in cleaned.split() if _clean_token(t)]
 
@@ -79,19 +78,53 @@ def _extract_gst_summary(lines: List[str]) -> Dict[str, Dict[str, float]]:
 
 
 def _split_pipe_table(lines: List[str]) -> List[Dict[str, Any]]:
+    """Parse true markdown pipe table + wrapped OCR pipe rows."""
+    pipe_lines = [ln for ln in lines if "|" in ln and "---" not in ln]
+    if not pipe_lines:
+        return []
+
     items: List[Dict[str, Any]] = []
-    header = None
-    for line in lines:
-        if "|" not in line or "---" in line:
-            continue
+    header: Optional[List[str]] = None
+    pending: List[str] = []
+
+    for line in pipe_lines:
         parts = [_clean_token(p) for p in line.split("|") if _clean_token(p)]
         if not parts:
             continue
+
         if header is None:
             header = parts
             continue
-        if header and len(parts) == len(header):
-            items.append(dict(zip(header, parts)))
+
+        pending.extend(parts)
+        if len(pending) < len(header):
+            continue
+
+        row_parts = pending[: len(header)]
+        pending = pending[len(header) :]
+        items.append(dict(zip(header, row_parts)))
+
+    return items
+
+
+def _split_xml_like_table(text: str) -> List[Dict[str, Any]]:
+    """Best-effort parser for XML/HTML table snippets (<tr><td>..)."""
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", text, flags=re.IGNORECASE | re.DOTALL)
+    parsed: List[List[str]] = []
+    for row in rows:
+        cells = re.findall(r"<(?:td|th)[^>]*>(.*?)</(?:td|th)>", row, flags=re.IGNORECASE | re.DOTALL)
+        clean = [re.sub(r"<[^>]+>", "", c).strip() for c in cells if c.strip()]
+        if clean:
+            parsed.append(clean)
+
+    if len(parsed) < 2:
+        return []
+
+    header = parsed[0]
+    items: List[Dict[str, Any]] = []
+    for vals in parsed[1:]:
+        if len(vals) >= len(header):
+            items.append(dict(zip(header, vals[: len(header)])))
     return items
 
 
@@ -103,13 +136,12 @@ def _parse_generic_row(tokens: List[str]) -> Optional[Dict[str, Any]]:
     if len(numeric) < 5:
         return None
 
-    # Prefer 7-number tail (qty,free,rate,amount,mrp,gst,discount), fallback gracefully.
     if len(numeric) >= 7:
         qty, free_qty, rate, amount, mrp, gst, discount = numeric[-7:]
     elif len(numeric) == 6:
         qty, free_qty, rate, amount, mrp, gst = numeric
         discount = 0.0
-    else:  # len == 5 (rare OCR omission)
+    else:
         qty, rate, amount, mrp, gst = numeric
         free_qty, discount = 0.0, 0.0
 
@@ -137,9 +169,7 @@ def _parse_generic_row(tokens: List[str]) -> Optional[Dict[str, Any]]:
     filtered: List[str] = []
     for i, tok in enumerate(head[: exp_idx - 2]):
         ct = _clean_token(tok)
-        if i == 0:
-            continue
-        if ct == hsn:
+        if i == 0 or ct == hsn:
             continue
         filtered.append(ct)
 
@@ -187,7 +217,9 @@ def _split_ocr_table(lines: List[str]) -> List[Dict[str, Any]]:
                 if i + 1 < len(lines):
                     nxt = lines[i + 1].strip()
                     nxt_toks = _tokenize(nxt)
-                    if nxt_toks and HSN_RE.match(_clean_token(nxt_toks[0])) and (len(nxt_toks) == 1 or len(_numeric_tail(nxt_toks)) == 0):
+                    if nxt_toks and HSN_RE.match(_clean_token(nxt_toks[0])) and (
+                        len(nxt_toks) == 1 or len(_numeric_tail(nxt_toks)) == 0
+                    ):
                         if not row.get("hsn"):
                             row["hsn"] = _clean_token(nxt_toks[0])
                         if len(nxt_toks) > 1:
@@ -201,7 +233,9 @@ def _split_ocr_table(lines: List[str]) -> List[Dict[str, Any]]:
 def parse_markdown_input(text: str) -> Dict[str, Any]:
     lines = [ln.rstrip() for ln in text.splitlines()]
 
-    items = _split_pipe_table(lines)
+    items = _split_xml_like_table(text)
+    if not items:
+        items = _split_pipe_table(lines)
     if not items:
         items = _split_ocr_table(lines)
 

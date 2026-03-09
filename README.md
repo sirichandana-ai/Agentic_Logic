@@ -92,7 +92,7 @@ python main.py my_invoice.md -o result.json
 
 Output contains:
 - `rows`: final corrected rows (1 row input => 1 row output, 2 rows => 2 rows, etc.)
-- `summary`: invoice-level recomputed totals and discrepancy flags
+- `summary`: invoice-level recomputed subtotal, GST total, grand total, and discrepancy flags
 
 ---
 
@@ -110,6 +110,8 @@ If you get `"rows": []`:
 
 - Uses alias + fuzzy matching to survive OCR spelling issues.
 - Uses deterministic math over OCR totals (trust math, not OCR blindly).
+- GST slab enforcement: row GST is normalized to allowed slabs (5, 12, 18, 28).
+- Row GST is validated against invoice GST summary buckets.
 - Applies tolerance thresholds for small rounding noise.
 - Runs domain sanity checks for practical invoice errors.
 - Handles split OCR rows where HSN/product continuation appears on the next line.
