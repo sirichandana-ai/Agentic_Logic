@@ -1,6 +1,5 @@
+import re
 from datetime import datetime
-
-ALLOWED_GST_SLABS = [5.0, 12.0, 18.0, 28.0]
 
 
 def is_major_difference(a, b):
@@ -21,16 +20,13 @@ def _parse_expiry(expiry):
     for p in patterns:
         try:
             dt = datetime.strptime(value, p)
+            # Normalize yy/mm patterns by swapping month-year when needed.
             if p in {"%y/%m", "%Y/%m"}:
                 dt = datetime(year=dt.year, month=int(value.split("/")[1]), day=1)
             return dt
         except ValueError:
             continue
     return None
-
-
-def _nearest_gst_slab(gst: float) -> float:
-    return min(ALLOWED_GST_SLABS, key=lambda s: abs(s - gst))
 
 
 def calculate_row(normalized_row: dict):
@@ -73,10 +69,8 @@ def calculate_row(normalized_row: dict):
         normalized_row["quantity"] = {"value": qty, "confidence": 0.5}
         flags.append("Negative quantity corrected to absolute value")
 
-    gst_summary = normalized_row.get("_gst_summary", {})
-
     if gst_percent is None:
-        buckets = [k for k, v in gst_summary.items() if v.get("taxable_value", 0) > 0]
+        buckets = [k for k, v in normalized_row.get("_gst_summary", {}).items() if v.get("taxable_value", 0) > 0]
         if len(buckets) == 1:
             gst_percent = float(buckets[0].replace("%", ""))
             normalized_row["gst_percent"] = {"value": gst_percent, "confidence": 0.8}
@@ -85,13 +79,8 @@ def calculate_row(normalized_row: dict):
             gst_percent = 0.0
             flags.append("Missing GST percent")
 
-    # enforce allowed GST slabs: 5/12/18/28
-    if gst_percent not in ALLOWED_GST_SLABS:
-        snapped = _nearest_gst_slab(gst_percent)
-        if abs(snapped - gst_percent) > 0.001:
-            flags.append(f"GST percent normalized from {gst_percent} to {snapped}")
-        gst_percent = snapped
-        normalized_row["gst_percent"] = {"value": gst_percent, "confidence": 0.7}
+    if gst_percent < 0 or gst_percent > 40:
+        flags.append("Suspicious GST percent")
 
     if discount < 0:
         discount = 0.0
@@ -111,18 +100,6 @@ def calculate_row(normalized_row: dict):
         else:
             normalized_row["amount"] = {"value": subtotal, "confidence": 0.6}
             flags.append("Amount auto-corrected from quantity × rate")
-
-    # validate GST bucket against summary per row
-    bucket = f"{int(gst_percent)}%"
-    if gst_summary and bucket not in gst_summary:
-        active = [k for k, v in gst_summary.items() if v.get("taxable_value", 0) > 0]
-        if len(active) == 1:
-            gst_percent = float(active[0].replace("%", ""))
-            normalized_row["gst_percent"] = {"value": gst_percent, "confidence": 0.6}
-            flags.append("GST percent aligned to active summary bucket")
-            bucket = active[0]
-        else:
-            flags.append("GST bucket not found in summary")
 
     gst_amount = round(subtotal * gst_percent / 100, 2)
 

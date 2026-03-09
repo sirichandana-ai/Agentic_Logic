@@ -1,6 +1,6 @@
 import re
 from difflib import SequenceMatcher
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from invoice_agent.agent.resolver.column_aliases import ALIASES, CANONICAL_FIELDS
 
@@ -34,6 +34,8 @@ def _normalize_value(field: str, value: Any) -> Any:
         return float(value)
     if isinstance(value, str):
         raw = value.replace(",", "").strip()
+        if not raw:
+            return None
         try:
             return float(raw)
         except ValueError:
@@ -41,7 +43,7 @@ def _normalize_value(field: str, value: Any) -> Any:
     return value
 
 
-def match_field(raw_key: str) -> Tuple[str | None, float]:
+def match_field(raw_key: str) -> Tuple[Optional[str], float]:
     cleaned = _clean_key(raw_key)
 
     for field, aliases in ALIASES.items():
@@ -64,12 +66,12 @@ def match_field(raw_key: str) -> Tuple[str | None, float]:
     return None, 0.0
 
 
-def normalize_item_row(raw_row: Dict[str, Any], gst_summary: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], list[str]]:
+def normalize_item_row(raw_row: Dict[str, Any], gst_summary: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     normalized = {field: {"value": None, "confidence": 0.0} for field in CANONICAL_FIELDS}
-    flags: list[str] = []
+    flags: List[str] = []
 
     for key, value in raw_row.items():
-        if value is None or (isinstance(value, str) and not value.strip()):
+        if value is None:
             continue
         field, conf = match_field(key)
         if field:
