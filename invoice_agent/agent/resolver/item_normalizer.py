@@ -69,6 +69,8 @@ def normalize_item_row(raw_row: Dict[str, Any], gst_summary: Dict[str, Any]) -> 
     flags: list[str] = []
 
     for key, value in raw_row.items():
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
         field, conf = match_field(key)
         if field:
             normalized[field] = {"value": _normalize_value(field, value), "confidence": conf}

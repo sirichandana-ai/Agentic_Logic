@@ -18,9 +18,24 @@ STOP_WORDS = {
 }
 
 
+def _clean_token(token: str) -> str:
+    return token.strip().strip("|:;,")
+
+
 def _to_float(token: str) -> Optional[float]:
-    token = token.replace(",", "").strip()
-    return float(token) if NUM_RE.match(token) else None
+    token = _clean_token(token).replace(",", "")
+    if not NUM_RE.match(token):
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _tokenize(line: str) -> List[str]:
+    # Handle markdown/ocr mixed separators robustly.
+    cleaned = line.replace("|", " ")
+    return [_clean_token(t) for t in cleaned.split() if _clean_token(t)]
 
 
 def _numeric_tail(tokens: List[str]) -> List[float]:
@@ -69,7 +84,7 @@ def _split_pipe_table(lines: List[str]) -> List[Dict[str, Any]]:
     for line in lines:
         if "|" not in line or "---" in line:
             continue
-        parts = [p.strip() for p in line.split("|") if p.strip()]
+        parts = [_clean_token(p) for p in line.split("|") if _clean_token(p)]
         if not parts:
             continue
         if header is None:
@@ -81,50 +96,52 @@ def _split_pipe_table(lines: List[str]) -> List[Dict[str, Any]]:
 
 
 def _parse_generic_row(tokens: List[str]) -> Optional[Dict[str, Any]]:
-    if len(tokens) < 10:
+    if len(tokens) < 8:
         return None
 
     numeric = _numeric_tail(tokens)
-    if len(numeric) < 6:
+    if len(numeric) < 5:
         return None
 
-    # Map from right: qty, free, rate, amount, mrp, gst, [discount]
-    discount = numeric[-1] if len(numeric) >= 7 else 0.0
-    gst = numeric[-2] if len(numeric) >= 6 else 0.0
-    mrp = numeric[-3] if len(numeric) >= 5 else 0.0
-    amount = numeric[-4] if len(numeric) >= 4 else 0.0
-    rate = numeric[-5] if len(numeric) >= 3 else 0.0
-    free_qty = numeric[-6] if len(numeric) >= 2 else 0.0
-    qty = numeric[-7] if len(numeric) >= 7 else numeric[0]
+    # Prefer 7-number tail (qty,free,rate,amount,mrp,gst,discount), fallback gracefully.
+    if len(numeric) >= 7:
+        qty, free_qty, rate, amount, mrp, gst, discount = numeric[-7:]
+    elif len(numeric) == 6:
+        qty, free_qty, rate, amount, mrp, gst = numeric
+        discount = 0.0
+    else:  # len == 5 (rare OCR omission)
+        qty, rate, amount, mrp, gst = numeric
+        free_qty, discount = 0.0, 0.0
 
     head = tokens[: len(tokens) - len(numeric)]
     if len(head) < 4:
         return None
 
-    exp_idx = next((i for i, t in enumerate(head) if EXP_RE.match(t)), None)
+    exp_idx = next((i for i, t in enumerate(head) if EXP_RE.match(_clean_token(t))), None)
     if exp_idx is None or exp_idx < 2:
         return None
 
-    expiry = head[exp_idx]
-    batch = head[exp_idx - 1]
-    pack = head[exp_idx - 2]
+    expiry = _clean_token(head[exp_idx])
+    batch = _clean_token(head[exp_idx - 1])
+    pack = _clean_token(head[exp_idx - 2])
 
-    # HSN can appear anywhere before pack/expiry in broken OCR lines.
     hsn = None
     for t in head[: exp_idx - 1]:
-        if HSN_RE.match(t):
-            hsn = t
+        ct = _clean_token(t)
+        if HSN_RE.match(ct):
+            hsn = ct
             break
 
-    company = head[0]
+    company = _clean_token(head[0])
 
     filtered: List[str] = []
     for i, tok in enumerate(head[: exp_idx - 2]):
+        ct = _clean_token(tok)
         if i == 0:
             continue
-        if tok == hsn:
+        if ct == hsn:
             continue
-        filtered.append(tok)
+        filtered.append(ct)
 
     product_name = " ".join(filtered).strip()
     if not product_name:
@@ -152,7 +169,7 @@ def _split_ocr_table(lines: List[str]) -> List[Dict[str, Any]]:
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        low = line.lower()
+        low = line.lower().strip("| ")
         if not line or any(low.startswith(w) for w in STOP_WORDS):
             i += 1
             continue
@@ -160,20 +177,19 @@ def _split_ocr_table(lines: List[str]) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        toks = line.split()
+        toks = _tokenize(line)
         nums = _numeric_tail(toks)
-        has_exp = any(EXP_RE.match(t) for t in toks)
+        has_exp = any(EXP_RE.match(_clean_token(t)) for t in toks)
 
-        if len(nums) >= 6 and has_exp:
+        if len(nums) >= 5 and has_exp:
             row = _parse_generic_row(toks)
             if row:
-                # OCR often puts HSN/product tail on next line: "30059098 15CM"
                 if i + 1 < len(lines):
                     nxt = lines[i + 1].strip()
-                    nxt_toks = nxt.split()
-                    if nxt_toks and HSN_RE.match(nxt_toks[0]) and (len(nxt_toks) == 1 or len(_numeric_tail(nxt_toks)) == 0):
+                    nxt_toks = _tokenize(nxt)
+                    if nxt_toks and HSN_RE.match(_clean_token(nxt_toks[0])) and (len(nxt_toks) == 1 or len(_numeric_tail(nxt_toks)) == 0):
                         if not row.get("hsn"):
-                            row["hsn"] = nxt_toks[0]
+                            row["hsn"] = _clean_token(nxt_toks[0])
                         if len(nxt_toks) > 1:
                             row["product_name"] = f"{row['product_name']} {' '.join(nxt_toks[1:])}".strip()
                         i += 1

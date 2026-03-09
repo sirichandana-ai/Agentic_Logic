@@ -96,6 +96,16 @@ Output contains:
 
 ---
 
+
+## Troubleshooting
+
+If you get `"rows": []`:
+- ensure you run from repo root: `python main.py sample_data/2.md`
+- confirm the input has at least one row with expiry + numeric tail (qty/rate/amount).
+- parser now supports both pipe-table markdown and broken OCR lines split across multiple lines.
+
+---
+
 ## Robustness strategy
 
 - Uses alias + fuzzy matching to survive OCR spelling issues.
