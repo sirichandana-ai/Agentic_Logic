@@ -16,7 +16,7 @@ ALIASES = {
     "pack": ["pack", "packing", "size", "uom", "unit"],
     "barcode": ["barcode", "bar_code", "barcodeno"],
     "code": ["code", "itemcode", "productcode", "sku"],
-    "quantity": ["quantity", "qty", "qnty", "quantty", "units", "pcs", "nos", "noofunits"],
+    "quantity": ["quantity", "qty", "qnty", "quantty", "units", "pcs", "nos", "noofunits", "olv"],
     "free_quantity": ["free", "freeqty", "freequantity", "bonus", "schqty", "schemeqty"],
     "rate": ["rate", "price", "unitrate", "unitprice", "ptr"],
     "amount": ["amount", "total", "taxablevalue", "value", "taxable", "lineamount"],
