@@ -4,6 +4,19 @@ from typing import Any, Dict, Tuple
 
 from invoice_agent.agent.resolver.column_aliases import ALIASES, CANONICAL_FIELDS
 
+NUMERIC_FIELDS = {
+    "quantity",
+    "free_quantity",
+    "rate",
+    "amount",
+    "mrp",
+    "gst_percent",
+    "discount_percent",
+    "cgst",
+    "sgst",
+    "igst",
+}
+
 
 def _clean_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(key).lower())
@@ -13,9 +26,12 @@ def _sim(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-def _normalize_numeric(value: Any) -> Any:
+def _normalize_value(field: str, value: Any) -> Any:
+    if field not in NUMERIC_FIELDS:
+        return value.strip() if isinstance(value, str) else value
+
     if isinstance(value, (int, float)):
-        return value
+        return float(value)
     if isinstance(value, str):
         raw = value.replace(",", "").strip()
         try:
@@ -55,7 +71,7 @@ def normalize_item_row(raw_row: Dict[str, Any], gst_summary: Dict[str, Any]) -> 
     for key, value in raw_row.items():
         field, conf = match_field(key)
         if field:
-            normalized[field] = {"value": _normalize_numeric(value), "confidence": conf}
+            normalized[field] = {"value": _normalize_value(field, value), "confidence": conf}
 
     gst = normalized["gst_percent"]["value"]
     if gst is not None:

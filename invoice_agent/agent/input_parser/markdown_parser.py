@@ -4,12 +4,33 @@ from typing import Any, Dict, List, Optional
 
 NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 EXP_RE = re.compile(r"^(?:\d{1,2}[/-]\d{2,4}|\d{2,4}[/-]\d{1,2})$")
-STOP_WORDS = {"note", "subtotal", "gst", "net", "t.rates", "total", "less", "rounding", "amount in words"}
+HSN_RE = re.compile(r"^\d{4,8}$")
+STOP_WORDS = {
+    "note",
+    "subtotal",
+    "gst",
+    "net",
+    "t.rates",
+    "total",
+    "less",
+    "rounding",
+    "amount in words",
+}
 
 
 def _to_float(token: str) -> Optional[float]:
     token = token.replace(",", "").strip()
     return float(token) if NUM_RE.match(token) else None
+
+
+def _numeric_tail(tokens: List[str]) -> List[float]:
+    vals: List[float] = []
+    for t in reversed(tokens):
+        val = _to_float(t)
+        if val is None:
+            break
+        vals.append(val)
+    return list(reversed(vals))
 
 
 def _extract_totals(text: str) -> Dict[str, float]:
@@ -59,39 +80,54 @@ def _split_pipe_table(lines: List[str]) -> List[Dict[str, Any]]:
     return items
 
 
-def _parse_row_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
-    if len(tokens) < 12:
+def _parse_generic_row(tokens: List[str]) -> Optional[Dict[str, Any]]:
+    if len(tokens) < 10:
         return None
 
-    right = []
-    idx = len(tokens) - 1
-    while idx >= 0 and len(right) < 7:
-        val = _to_float(tokens[idx])
-        if val is None:
-            return None
-        right.append(val)
-        idx -= 1
-
-    if len(right) < 7 or idx < 3:
+    numeric = _numeric_tail(tokens)
+    if len(numeric) < 6:
         return None
 
-    discount, gst, mrp, amount, rate, free_qty, qty = right
+    # Map from right: qty, free, rate, amount, mrp, gst, [discount]
+    discount = numeric[-1] if len(numeric) >= 7 else 0.0
+    gst = numeric[-2] if len(numeric) >= 6 else 0.0
+    mrp = numeric[-3] if len(numeric) >= 5 else 0.0
+    amount = numeric[-4] if len(numeric) >= 4 else 0.0
+    rate = numeric[-5] if len(numeric) >= 3 else 0.0
+    free_qty = numeric[-6] if len(numeric) >= 2 else 0.0
+    qty = numeric[-7] if len(numeric) >= 7 else numeric[0]
 
-    exp = tokens[idx]
-    idx -= 1
-    batch = tokens[idx]
-    idx -= 1
-    pack = tokens[idx]
-    idx -= 1
-
-    if idx < 2:
+    head = tokens[: len(tokens) - len(numeric)]
+    if len(head) < 4:
         return None
 
-    company = tokens[0]
-    hsn = tokens[1]
-    product_name = " ".join(tokens[2 : idx + 1]).strip()
+    exp_idx = next((i for i, t in enumerate(head) if EXP_RE.match(t)), None)
+    if exp_idx is None or exp_idx < 2:
+        return None
 
-    if not product_name or not EXP_RE.match(exp):
+    expiry = head[exp_idx]
+    batch = head[exp_idx - 1]
+    pack = head[exp_idx - 2]
+
+    # HSN can appear anywhere before pack/expiry in broken OCR lines.
+    hsn = None
+    for t in head[: exp_idx - 1]:
+        if HSN_RE.match(t):
+            hsn = t
+            break
+
+    company = head[0]
+
+    filtered: List[str] = []
+    for i, tok in enumerate(head[: exp_idx - 2]):
+        if i == 0:
+            continue
+        if tok == hsn:
+            continue
+        filtered.append(tok)
+
+    product_name = " ".join(filtered).strip()
+    if not product_name:
         return None
 
     return {
@@ -100,7 +136,7 @@ def _parse_row_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
         "product_name": product_name,
         "pack": pack,
         "batch": batch,
-        "expiry": exp,
+        "expiry": expiry,
         "quantity": qty,
         "free_quantity": free_qty,
         "rate": rate,
@@ -111,49 +147,38 @@ def _parse_row_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
     }
 
 
-def _split_space_table(lines: List[str]) -> List[Dict[str, Any]]:
+def _split_ocr_table(lines: List[str]) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
-    in_table = False
-
-    for line in lines:
-        stripped = line.strip()
-        low = stripped.lower()
-
-        if not stripped:
-            if in_table and items:
-                break
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        low = line.lower()
+        if not line or any(low.startswith(w) for w in STOP_WORDS):
+            i += 1
+            continue
+        if "product name" in low and "amount" in low:
+            i += 1
             continue
 
-        if not in_table and (("product name" in low and "qty" in low) or ("mfg" in low and "hsn" in low and "amount" in low)):
-            in_table = True
-            continue
+        toks = line.split()
+        nums = _numeric_tail(toks)
+        has_exp = any(EXP_RE.match(t) for t in toks)
 
-        if not in_table:
-            continue
-
-        if any(low.startswith(w) for w in STOP_WORDS):
-            break
-
-        row = _parse_row_tokens(stripped.split())
-        if row:
-            items.append(row)
-
-    return items
-
-
-def _parse_compact_rows(lines: List[str]) -> List[Dict[str, Any]]:
-    """Fallback for OCR where header and rows are not perfectly aligned."""
-    items: List[Dict[str, Any]] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or any(stripped.lower().startswith(w) for w in STOP_WORDS):
-            continue
-        tokens = stripped.split()
-        # compact row usually starts with company+hsn and ends with 6-7 numerics
-        if len(tokens) >= 12 and _to_float(tokens[-1]) is not None and _to_float(tokens[-2]) is not None:
-            row = _parse_row_tokens(tokens)
+        if len(nums) >= 6 and has_exp:
+            row = _parse_generic_row(toks)
             if row:
+                # OCR often puts HSN/product tail on next line: "30059098 15CM"
+                if i + 1 < len(lines):
+                    nxt = lines[i + 1].strip()
+                    nxt_toks = nxt.split()
+                    if nxt_toks and HSN_RE.match(nxt_toks[0]) and (len(nxt_toks) == 1 or len(_numeric_tail(nxt_toks)) == 0):
+                        if not row.get("hsn"):
+                            row["hsn"] = nxt_toks[0]
+                        if len(nxt_toks) > 1:
+                            row["product_name"] = f"{row['product_name']} {' '.join(nxt_toks[1:])}".strip()
+                        i += 1
                 items.append(row)
+        i += 1
     return items
 
 
@@ -162,9 +187,7 @@ def parse_markdown_input(text: str) -> Dict[str, Any]:
 
     items = _split_pipe_table(lines)
     if not items:
-        items = _split_space_table(lines)
-    if not items:
-        items = _parse_compact_rows(lines)
+        items = _split_ocr_table(lines)
 
     gst_summary = _extract_gst_summary(lines)
     totals = _extract_totals(text)

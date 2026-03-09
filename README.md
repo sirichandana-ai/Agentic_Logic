@@ -102,6 +102,7 @@ Output contains:
 - Uses deterministic math over OCR totals (trust math, not OCR blindly).
 - Applies tolerance thresholds for small rounding noise.
 - Runs domain sanity checks for practical invoice errors.
+- Handles split OCR rows where HSN/product continuation appears on the next line.
 - Emits row-level and invoice-level flags for auditability.
 
 ---
