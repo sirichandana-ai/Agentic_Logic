@@ -1,3 +1,7 @@
+import re
+from datetime import datetime
+
+
 def is_major_difference(a, b):
     if a is None or b is None:
         return False
@@ -5,6 +9,24 @@ def is_major_difference(a, b):
     if diff <= 1:
         return False
     return diff / max(abs(a), abs(b), 1) > 0.01
+
+
+def _parse_expiry(expiry):
+    if not expiry or not isinstance(expiry, str):
+        return None
+
+    value = expiry.strip()
+    patterns = ["%m/%y", "%m/%Y", "%m-%y", "%m-%Y", "%y/%m", "%Y/%m"]
+    for p in patterns:
+        try:
+            dt = datetime.strptime(value, p)
+            # Normalize yy/mm patterns by swapping month-year when needed.
+            if p in {"%y/%m", "%Y/%m"}:
+                dt = datetime(year=dt.year, month=int(value.split("/")[1]), day=1)
+            return dt
+        except ValueError:
+            continue
+    return None
 
 
 def calculate_row(normalized_row: dict):
@@ -23,6 +45,7 @@ def calculate_row(normalized_row: dict):
     gst_percent = safe_float(normalized_row["gst_percent"]["value"])
     discount = safe_float(normalized_row["discount_percent"]["value"]) or 0.0
     provided_amount = safe_float(normalized_row["amount"]["value"])
+    mrp = safe_float(normalized_row["mrp"]["value"])
 
     if qty is None and rate not in (None, 0) and provided_amount is not None:
         qty = round(provided_amount / rate, 4)
@@ -41,6 +64,11 @@ def calculate_row(normalized_row: dict):
         rate = 0.0
         flags.append("Missing rate")
 
+    if qty < 0:
+        qty = abs(qty)
+        normalized_row["quantity"] = {"value": qty, "confidence": 0.5}
+        flags.append("Negative quantity corrected to absolute value")
+
     if gst_percent is None:
         buckets = [k for k, v in normalized_row.get("_gst_summary", {}).items() if v.get("taxable_value", 0) > 0]
         if len(buckets) == 1:
@@ -50,6 +78,14 @@ def calculate_row(normalized_row: dict):
         else:
             gst_percent = 0.0
             flags.append("Missing GST percent")
+
+    if gst_percent < 0 or gst_percent > 40:
+        flags.append("Suspicious GST percent")
+
+    if discount < 0:
+        discount = 0.0
+        normalized_row["discount_percent"] = {"value": discount, "confidence": 0.5}
+        flags.append("Negative discount corrected to 0")
 
     subtotal = round(qty * rate, 2)
 
@@ -75,6 +111,17 @@ def calculate_row(normalized_row: dict):
         sgst = 0.0
 
     row_total = round(subtotal + gst_amount - discount, 2)
+
+    exp = normalized_row.get("expiry", {}).get("value")
+    parsed_exp = _parse_expiry(exp)
+    if exp and parsed_exp is None:
+        flags.append("Invalid expiry format")
+
+    if mrp is not None and rate is not None and mrp > 0 and rate > mrp * 1.2:
+        flags.append("Rate significantly higher than MRP")
+
+    if qty == 0 and subtotal > 0:
+        flags.append("Subtotal present but quantity is zero")
 
     normalized_row["subtotal"] = {"value": subtotal, "confidence": 1.0}
     normalized_row["gst_amount"] = {"value": gst_amount, "confidence": 1.0}

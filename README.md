@@ -9,8 +9,9 @@ Given noisy OCR markdown (wrong aliases, missing values, wrong totals), this pip
 1. Parses rows from markdown (pipe-table and OCR space-table styles).
 2. Normalizes field names to a canonical schema.
 3. Recalculates row math (`subtotal`, `gst_amount`, `cgst`, `sgst`, `row_total`).
-4. Flags suspicious corrections instead of silently failing.
-5. Returns clean database-ready rows.
+4. Applies domain validations (expiry format, GST sanity, MRP sanity, negative values).
+5. Flags suspicious corrections instead of silently failing.
+6. Returns clean database-ready rows.
 
 ---
 
@@ -36,9 +37,10 @@ main.py
     - `items`
     - `gst_summary`
     - `totals`
-  - Handles both:
+  - Handles:
     - pipe tables (`| col |`)
-    - space-separated OCR tables (`MFG Hsn Product ...`)
+    - OCR space-separated tables (`MFG Hsn Product ...`)
+    - compact fallback rows for uneven OCR layouts
 
 - `invoice_agent/agent/resolver/item_normalizer.py`
   - Maps noisy keys (`Descrption`, `quantty`, `tax`) to canonical fields.
@@ -48,6 +50,7 @@ main.py
   - Deterministically computes invoice row values.
   - Infers missing values (qty/rate/gst%) when possible.
   - Auto-corrects major mismatches and records flags.
+  - Runs domain checks (expiry format, MRP-vs-rate sanity, GST range sanity).
 
 - `invoice_agent/agent/reasoning/invoice_aggregator.py`
   - Rebuilds invoice-level subtotal + GST from computed rows.
@@ -70,17 +73,26 @@ Each row in output `rows` contains:
 
 ---
 
-## Run
+## How to run (your actual workflow)
+
+### 1) Put your OLMOCR markdown file anywhere
+Example: `my_invoice.md`
+
+### 2) Run parser + rule engine
 
 ```bash
-python main.py sample_data/invoice_from_olmocr.md
+python main.py my_invoice.md
 ```
 
-Optional output file:
+### 3) Optional: save output JSON
 
 ```bash
-python main.py sample_data/invoice_from_olmocr.md -o output.json
+python main.py my_invoice.md -o result.json
 ```
+
+Output contains:
+- `rows`: final corrected rows (1 row input => 1 row output, 2 rows => 2 rows, etc.)
+- `summary`: invoice-level recomputed totals and discrepancy flags
 
 ---
 
@@ -89,13 +101,18 @@ python main.py sample_data/invoice_from_olmocr.md -o output.json
 - Uses alias + fuzzy matching to survive OCR spelling issues.
 - Uses deterministic math over OCR totals (trust math, not OCR blindly).
 - Applies tolerance thresholds for small rounding noise.
+- Runs domain sanity checks for practical invoice errors.
 - Emits row-level and invoice-level flags for auditability.
 
 ---
 
-## Extending for your invoices
+## Already done for your requested extension points
 
-1. Add aliases in `resolver/column_aliases.py`.
-2. Add custom row parsers in `input_parser/markdown_parser.py` if your OCR format changes.
-3. Add domain checks in `reasoning/row_calculator.py` (e.g., expiry validity, MRP sanity).
+1. **Added aliases** in `resolver/column_aliases.py` (expanded business variants like `particulars`, `sku`, `schemeqty`, etc.).
+2. **Added custom row parser fallback** in `input_parser/markdown_parser.py` for compact OCR row patterns.
+3. **Added domain checks** in `reasoning/row_calculator.py`:
+   - expiry format check
+   - suspicious GST% range check
+   - rate-vs-MRP sanity
+   - negative quantity/discount correction flags
 

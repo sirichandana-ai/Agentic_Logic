@@ -3,7 +3,8 @@ from typing import Any, Dict, List, Optional
 
 
 NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
-STOP_WORDS = {"note", "subtotal", "gst", "net", "t.rates", "total", "less", "rounding"}
+EXP_RE = re.compile(r"^(?:\d{1,2}[/-]\d{2,4}|\d{2,4}[/-]\d{1,2})$")
+STOP_WORDS = {"note", "subtotal", "gst", "net", "t.rates", "total", "less", "rounding", "amount in words"}
 
 
 def _to_float(token: str) -> Optional[float]:
@@ -28,7 +29,6 @@ def _extract_totals(text: str) -> Dict[str, float]:
 def _extract_gst_summary(lines: List[str]) -> Dict[str, Dict[str, float]]:
     gst_summary: Dict[str, Dict[str, float]] = {}
     for line in lines:
-        # Example: 18%: 1590.00 143.10 143.10
         m = re.search(
             r"(\d{1,2}%)\s*[:\-]?\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)",
             line,
@@ -59,11 +59,10 @@ def _split_pipe_table(lines: List[str]) -> List[Dict[str, Any]]:
     return items
 
 
-def _extract_row_from_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
+def _parse_row_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
     if len(tokens) < 12:
         return None
 
-    # From right side: discount, gst, mrp, amount, rate, free_qty, qty
     right = []
     idx = len(tokens) - 1
     while idx >= 0 and len(right) < 7:
@@ -73,13 +72,10 @@ def _extract_row_from_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
         right.append(val)
         idx -= 1
 
-    if len(right) < 7:
+    if len(right) < 7 or idx < 3:
         return None
 
     discount, gst, mrp, amount, rate, free_qty, qty = right
-
-    if idx < 3:
-        return None
 
     exp = tokens[idx]
     idx -= 1
@@ -91,12 +87,11 @@ def _extract_row_from_tokens(tokens: List[str]) -> Optional[Dict[str, Any]]:
     if idx < 2:
         return None
 
-    hsn = tokens[1]
-    product_tokens = tokens[2 : idx + 1]
-    product_name = " ".join(product_tokens).strip()
     company = tokens[0]
+    hsn = tokens[1]
+    product_name = " ".join(tokens[2 : idx + 1]).strip()
 
-    if not product_name:
+    if not product_name or not EXP_RE.match(exp):
         return None
 
     return {
@@ -125,11 +120,11 @@ def _split_space_table(lines: List[str]) -> List[Dict[str, Any]]:
         low = stripped.lower()
 
         if not stripped:
-            if in_table:
+            if in_table and items:
                 break
             continue
 
-        if "product name" in low and "qty" in low and "amount" in low:
+        if not in_table and (("product name" in low and "qty" in low) or ("mfg" in low and "hsn" in low and "amount" in low)):
             in_table = True
             continue
 
@@ -139,11 +134,26 @@ def _split_space_table(lines: List[str]) -> List[Dict[str, Any]]:
         if any(low.startswith(w) for w in STOP_WORDS):
             break
 
-        tokens = stripped.split()
-        row = _extract_row_from_tokens(tokens)
+        row = _parse_row_tokens(stripped.split())
         if row:
             items.append(row)
 
+    return items
+
+
+def _parse_compact_rows(lines: List[str]) -> List[Dict[str, Any]]:
+    """Fallback for OCR where header and rows are not perfectly aligned."""
+    items: List[Dict[str, Any]] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or any(stripped.lower().startswith(w) for w in STOP_WORDS):
+            continue
+        tokens = stripped.split()
+        # compact row usually starts with company+hsn and ends with 6-7 numerics
+        if len(tokens) >= 12 and _to_float(tokens[-1]) is not None and _to_float(tokens[-2]) is not None:
+            row = _parse_row_tokens(tokens)
+            if row:
+                items.append(row)
     return items
 
 
@@ -153,6 +163,8 @@ def parse_markdown_input(text: str) -> Dict[str, Any]:
     items = _split_pipe_table(lines)
     if not items:
         items = _split_space_table(lines)
+    if not items:
+        items = _parse_compact_rows(lines)
 
     gst_summary = _extract_gst_summary(lines)
     totals = _extract_totals(text)
